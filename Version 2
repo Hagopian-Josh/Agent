@@ -1,4 +1,4 @@
-                                                                                            FRONT END:
+                                                                                            FRONT END: 
 import gradio as gr
 import requests
 import json # Import json for proper handling of dictionaries in state

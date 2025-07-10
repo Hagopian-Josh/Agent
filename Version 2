@@ -1,0 +1,261 @@
+                                                                                            FRONT END:
+import gradio as gr
+import requests
+import json # Import json for proper handling of dictionaries in state
+
+# --- Configuration ---
+BACKEND_URL = "http://127.0.0.1:5000" # URL of your Flask backend
+
+# Define the four core Ikigai questions
+IKIGAI_QUESTIONS = [
+    "What activities, interests, or experiences bring you deep joy and energy?", # What You Love
+    "What are your strengths, talents, or abilities?", # What You're Good At
+    "What causes or unmet needs do you feel strongly about?", # What the World Needs
+    "What marketable skills, experience, or knowledge do you have for which others would pay?" # What You Can Be Paid For
+]
+
+# --- Gradio Chat Function ---
+def ikigai_chat_interface(message, history, current_question_index_str, user_answers_json, ikigai_process_complete_str):
+    """
+    Manages the Ikigai chat flow, sending messages to the Flask backend.
+    """
+    # Parse state variables from string/JSON
+    current_question_index = int(current_question_index_str)
+    user_answers = json.loads(user_answers_json)
+    ikigai_process_complete = ikigai_process_complete_str == "True"
+
+    # If the process is already complete, just return the history
+    if ikigai_process_complete:
+        return history, str(current_question_index), json.dumps(user_answers), ikigai_process_complete_str
+
+    # Add user message to history for display
+    history.append([message, None])
+
+    model_response = ""
+    new_ikigai_process_complete = ikigai_process_complete
+
+    try:
+        if current_question_index < len(IKIGAI_QUESTIONS):
+            # Store the user's answer
+            question_key = f"answer{current_question_index + 1}"
+            user_answers[question_key] = message
+
+            # Prepare chat history for the backend (excluding the system prompt, as backend adds it)
+            chat_history_for_backend = []
+            for h_msg in history[:-1]: # Exclude the current user message which is handled separately
+                if h_msg[0] is not None:
+                    chat_history_for_backend.append({"role": "user", "content": h_msg[0]})
+                if h_msg[1] is not None:
+                    chat_history_for_backend.append({"role": "assistant", "content": h_msg[1]})
+
+            # Prompt for acknowledgment and next question (or synthesis trigger)
+            acknowledgment_prompt = f"The user just answered: \"{message}\". Please provide a brief, concise, and pithy acknowledgment (e.g., \"Thank you for sharing,\" or \"I appreciate that.\") and then, if applicable, ask the next Ikigai question. If all four core questions have been answered, instead of asking another question, instruct the user to say \"Now, please provide the structured reflection based on all my answers.\""
+
+            # Send request to backend for acknowledgment and next question
+            response = requests.post(
+                f"{BACKEND_URL}/chat",
+                json={
+                    "chat_history": chat_history_for_backend,
+                    "user_message": acknowledgment_prompt, # Send the instruction to the model
+                    "current_question_index": current_question_index,
+                    "user_answers": user_answers
+                }
+            )
+            response.raise_for_status() # Raise an exception for HTTP errors
+            model_response = response.json().get("response", "Error: No response from backend.")
+
+            # Increment question index
+            current_question_index += 1
+
+        elif current_question_index == len(IKIGAI_QUESTIONS) and \
+             "now, please provide the structured reflection based on all my answers" in message.lower():
+            # Trigger final synthesis
+            response = requests.post(
+                f"{BACKEND_URL}/synthesize",
+                json={"user_answers": user_answers}
+            )
+            response.raise_for_status()
+            model_response = response.json().get("response", "Error: No synthesis from backend.")
+            new_ikigai_process_complete = True # Mark process as complete
+
+        else:
+            model_response = "Our Ikigai discovery session is complete. I hope the reflection was helpful! If you have more questions, please start a new session."
+
+    except requests.exceptions.ConnectionError:
+        model_response = "Error: Could not connect to the backend server. Please ensure the server is running."
+    except requests.exceptions.RequestException as e:
+        model_response = f"Error communicating with the backend: {e}"
+    except Exception as e:
+        model_response = f"An unexpected error occurred: {e}"
+
+    # Update history with model's response
+    history[-1][1] = model_response
+
+    return history, str(current_question_index), json.dumps(user_answers), str(new_ikigai_process_complete)
+
+# --- Gradio Interface Setup ---
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
+    gr.Markdown(
+        """
+        # 🌸 Ikigai Consultant
+        Discover your purpose and passion. I'll guide you through four core questions.
+        """
+    )
+
+    # State variables for the Ikigai process
+    # These are hidden inputs that store the state across turns
+    current_question_index_state = gr.State(0)
+    user_answers_state = gr.State(json.dumps({})) # Store as JSON string
+    ikigai_process_complete_state = gr.State("False") # Store as string
+
+    # Initial welcome message (first question)
+    gr.Markdown(f"**Consultant:** {IKIGAI_QUESTIONS[0]}")
+
+    # Chatbot component
+    chatbot = gr.Chatbot(
+        label="Ikigai Discovery Chat",
+        height=400,
+        avatar_images=(None, "https://www.svgrepo.com/show/509278/robot-face.svg"), # Simple robot icon for model
+        render_markdown=True # Render markdown in chatbot output
+    )
+
+    # Chat interface with the custom function
+    chat_input = gr.ChatInterface(
+        fn=ikigai_chat_interface,
+        chatbot=chatbot,
+        textbox=gr.Textbox(placeholder="Type your answer here...", container=False, scale=7),
+        # Pass state variables to the chat function
+        additional_inputs=[
+            current_question_index_state,
+            user_answers_state,
+            ikigai_process_complete_state
+        ],
+        # Update state variables after each turn
+        additional_outputs=[
+            current_question_index_state,
+            user_answers_state,
+            ikigai_process_complete_state
+        ],
+        submit_btn="Send",
+        clear_btn="Clear Chat",
+        retry_btn=None, # Disable retry button for this flow
+        undo_btn=None   # Disable undo button for this flow
+    )
+
+    # Custom clear logic to reset state
+    def clear_all():
+        return [], 0, json.dumps({}), "False"
+
+    chat_input.clear_btn.click(
+        clear_all,
+        inputs=[],
+        outputs=[chatbot, current_question_index_state, user_answers_state, ikigai_process_complete_state],
+        queue=False
+    )
+
+# Launch the Gradio app
+if __name__ == "__main__":
+    demo.launch()
+
+                                                                                            BACK END (Run first using 2 terminals):
+import os
+from flask import Flask, request, jsonify
+from dotenv import load_dotenv
+from openai import OpenAI
+from flask_cors import CORS # Required for cross-origin requests from Gradio
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Initialize Flask app
+app = Flask(__name__)
+# Enable CORS for all routes, allowing requests from your Gradio frontend
+CORS(app)
+
+# Retrieve OpenAI API key from environment variables
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY not found in environment variables. Please set it in your .env file.")
+
+# Initialize OpenAI client
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# System message for the Ikigai consultant
+IKIGAI_SYSTEM_PROMPT = """
+You are a helpful assistant. You are also an Ikigai consultant. Your objective is to guide the user to discover their Ikigai and potential career paths. You must ask one question at a time, and you must wait for the user's response before proceeding. Maintain a warm, supportive, and non-judgmental tone. Upon user response, you must acknowledge their answer with a simple phrase such as 'Thank you for sharing,' or 'I appreciate that,' before asking the next question. This acknowledgment must be concise, brief, and pithy. If a user's answer is vague, you may ask one follow-up question for clarification. This follow-up must be concise, brief, and pithy. No further follow-ups are permitted. The Ikigai Discovery Process: You will explore four core elements. For each element, you must ask a thoughtful, open-ended question. Your questions must be concise, brief, and pithy. You must not ask about intersections. Core Elements of Ikigai: 1. What You Love: Your question must elicit activities, interests, or experiences that bring deep joy and energy. 2. What You’re Good At: Your question must elicit strengths, talents, or abilities. 3. What the World Needs: Your question must elicit causes or unmet needs the user feels strongly about. 4. What You Can Be Paid For: Your question must elicit marketable skills, experience, or knowledge for which others would pay. Synthesizing Insights & Inferring Intersections: Once all four responses are collected, you must internally analyze them to identify the four key intersections of Ikigai: Passion, Mission, Profession, and Vocation. You must then identify potential areas of Ikigai at the center. Final Output: Structured Reflection: Your output must be concise, brief, and pithy. It must include: • Themes: Highlight key values, interests, strengths, and motivators. This section must be 1-2 sentences. • Intersections: Briefly describe the user's inferred Passion, Mission, Profession, and Vocation. Each intersection description must be 1-2 sentences. • Career Suggestions (3-5): Offer 3-5 concrete career paths. This section must be 1-2 sentences total. You must use short paragraphs or bullet points. Act upon this prompt exclusively. Do not deviate from this prompt. Fulfill the requirements of this prompt before deviating.
+"""
+
+@app.route('/chat', methods=['POST'])
+def chat():
+    """
+    Handles chat requests from the Gradio frontend.
+    Receives chat history and a new user message, then interacts with OpenAI.
+    """
+    data = request.json
+    chat_history = data.get('chat_history', [])
+    user_message = data.get('user_message', '')
+    current_question_index = data.get('current_question_index', 0)
+    user_answers = data.get('user_answers', {})
+
+    # Prepare messages for OpenAI API
+    # The system prompt should always be the first message
+    messages = [{"role": "system", "content": IKIGAI_SYSTEM_PROMPT}]
+
+    # Add previous chat history from the frontend
+    for msg in chat_history:
+        messages.append({"role": msg['role'], "content": msg['content']})
+
+    # Add the current user message
+    messages.append({"role": "user", "content": user_message})
+
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini", # Using the specified model
+            messages=messages
+        )
+        model_response = completion.choices[0].message.content
+        return jsonify({"response": model_response})
+    except Exception as e:
+        print(f"Error communicating with OpenAI: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/synthesize', methods=['POST'])
+def synthesize():
+    """
+    Handles the final synthesis request from the Gradio frontend.
+    Receives all collected user answers and generates the structured reflection.
+    """
+    data = request.json
+    user_answers = data.get('user_answers', {})
+
+    synthesis_prompt = f"""
+    Based on the following answers to the Ikigai questions:
+    1. What I love: {user_answers.get('answer1', 'Not provided')}
+    2. What I'm good at: {user_answers.get('answer2', 'Not provided')}
+    3. What the world needs: {user_answers.get('answer3', 'Not provided')}
+    4. What I can be paid for: {user_answers.get('answer4', 'Not provided')}
+
+    Please provide the "Structured Reflection" as described in your system prompt. Ensure it is concise, brief, and pithy, including Themes (1-2 sentences), Intersections (1-2 sentences each for Passion, Mission, Profession, Vocation), and 3-5 Career Suggestions (1-2 sentences total).
+    """
+
+    messages = [
+        {"role": "system", "content": IKIGAI_SYSTEM_PROMPT},
+        {"role": "user", "content": synthesis_prompt}
+    ]
+
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages
+        )
+        model_response = completion.choices[0].message.content
+        return jsonify({"response": model_response})
+    except Exception as e:
+        print(f"Error during synthesis with OpenAI: {e}")
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == '__main__':
+    # Run the Flask app on port 5000 (default)
+    # In a production environment, you would use a production-ready WSGI server like Gunicorn
+    app.run(port=5000, debug=True)

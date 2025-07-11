@@ -1,0 +1,244 @@
+# This is a Python script that runs an Ikigai Consultant chatbot.
+# It uses Gradio to create a web interface and OpenAI's API for the chatbot's brain.
+
+# First, we import all the necessary tools (libraries) we'll need.
+import os # For interacting with the operating system, like getting environment variables
+import gradio as gr # This is the library that helps us make a web interface easily
+from dotenv import load_dotenv # This helps us load secret keys from a .env file
+from openai import OpenAI # This is the library to talk to OpenAI's AI models
+# Removed: import json # No longer needed for handling structured data as strings
+
+# --- Setup Stuff (Configuration and Getting Ready) ---
+
+# This line tells the program to look for a file named .env in the same folder.
+# The .env file is where we keep our secret API key so it's not visible in the code.
+load_dotenv()
+
+# We get our secret OpenAI API key from the .env file.
+# We store it in a variable called OPENAI_API_KEY.
+my_openai_api_key = os.getenv("OPENAI_API_KEY")
+
+# This is a check to make sure we actually found the API key.
+# If we didn't find it, the program will stop and tell us to fix it.
+if not my_openai_api_key:
+    raise ValueError(
+        "Oops! Your OPENAI_API_KEY was not found. "
+        "Please make sure you have a .env file in the same folder as this script, "
+        "and inside it, you should have a line like: OPENAI_API_KEY=your_actual_key_here"
+    )
+
+# Now we create a special 'client' object that we'll use to talk to OpenAI.
+# We give it our API key so OpenAI knows who we are.
+openai_chat_client = OpenAI(api_key=my_openai_api_key)
+
+# This is the name of the specific AI model we want to use from OpenAI.
+# It's a smaller, faster version of GPT-4.
+the_ai_model_name = "gpt-4o-mini"
+
+# This is the most important instruction we give to our AI.
+# It tells the AI exactly how to behave as an Ikigai consultant.
+# It's a long text because it contains all the rules for the conversation.
+ikigai_consultant_rules = """
+You are a helpful assistant. You are also an Ikigai consultant. Your objective is to guide the user to discover their Ikigai and potential career paths. You must ask one question at a time, and you must wait for the user's response before proceeding. Maintain a warm, supportive, and non-judgmental tone. Upon user response, you must acknowledge their answer with a simple phrase such as 'Thank you for sharing,' or 'I appreciate that,' before asking the next question. You are not limited to only those two replies. This acknowledgment must be concise, brief, and pithy. If a user's answer is vague, you may ask one follow-up question for clarification. This follow-up must be concise, brief, and pithy. No further follow-ups are permitted. The Ikigai Discovery Process: You will explore four core elements. For each element, you must ask a thoughtful, open-ended question. Your questions must be concise, brief, and pithy. You must not ask about intersections. Core Elements of Ikigai: 1. What You Love: Your question must elicit activities, interests, or experiences that bring deep joy and energy. 2. What You’re Good At: Your question must elicit strengths, talents, or abilities. 3. What the World Needs: Your question must elicit causes or unmet needs the user feels strongly about. 4. What You Can Be Paid For: Your question must elicit marketable skills, experience, or knowledge for which others would pay. Synthesizing Insights & Inferring Intersections: Once all four responses are collected, you must internally analyze them to identify the four key intersections of Ikigai: Passion, Mission, Profession, and Vocation. You must then identify potential areas of Ikigai at the center. Final Output: Structured Reflection: Your output must be concise, brief, and pithy. It must include: • Themes: Highlight key values, interests, strengths, and motivators. This section must be 1-2 sentences. • Intersections: Briefly describe the user's inferred Passion, Mission, Profession, and Vocation. Each intersection description must be 1-2 sentences. • Career Suggestions (3-5): Offer 3-5 concrete career paths. This section must be 1-2 sentences total. You must use short paragraphs or bullet points. Act upon this prompt exclusively. Do not deviate from this prompt. Fulfill the requirements of this prompt before deviating.
+"""
+
+# These are the actual questions the Ikigai consultant will ask the user, one by one.
+the_ikigai_questions_list = [
+    "What activities, interests, or experiences bring you deep joy and energy?", # This is about what you love
+    "What are your strengths, talents, or abilities?", # This is about what you're good at
+    "What causes or unmet needs do you feel strongly about?", # This is about what the world needs
+    "What marketable skills, experience, or knowledge do you have for which others would pay?" # This is about what you can be paid for
+]
+
+# --- The Main Chat Function (How the Chatbot Works) ---
+
+# This function is called every time the user types a message and presses "Send".
+# It takes the user's message, the chat history (for display), and hidden state variables.
+# Note: chat_history_list will be a list of dictionaries (type='messages') for Gradio display.
+# ai_conversation_memory will be the clean history for OpenAI.
+def handle_ikigai_chat(user_input_message, chat_history_list, current_q_index_text, user_answers: dict, is_process_done_text, ai_conversation_memory: list):
+    # Parse state variables from string/JSON
+    current_question_number = int(current_q_index_text)
+    # user_answers and ai_conversation_memory are now passed directly as Python objects
+    is_ikigai_done = (is_process_done_text == "True")
+
+    ai_response_text = ""
+    new_process_done_status = is_ikigai_done
+
+    try:
+        # --- Handle the very first turn (when chat history is empty) ---
+        if not chat_history_list and current_question_number == 0:
+            # If it's the very beginning of the chat, the AI asks the first question.
+            ai_response_text = the_ikigai_questions_list[0]
+            # Add this initial question to the Gradio display history
+            chat_history_list.append({"role": "assistant", "content": ai_response_text})
+            # Add this to the AI's internal memory as well
+            ai_conversation_memory.append({"role": "assistant", "content": ai_response_text})
+            # We don't increment current_question_number here, as the first question is just asked.
+            # The next user input will correspond to answer1.
+            return chat_history_list, str(current_question_number), user_answers, str(new_process_done_status), ai_conversation_memory
+
+        # --- Handle subsequent turns (after the first question has been asked) ---
+        if is_ikigai_done:
+            # If the process is already complete, just return the current state
+            # and a polite message if the user keeps typing.
+            ai_response_text = "Our Ikigai discovery session is complete. I hope the reflection was helpful! If you want to start over, just refresh the page."
+            # Add user's last message to display history
+            chat_history_list.append({"role": "user", "content": user_input_message})
+            # Add AI's polite response to display history
+            chat_history_list.append({"role": "assistant", "content": ai_response_text})
+            # No changes to ai_conversation_memory as the process is done
+            return chat_history_list, str(current_question_number), user_answers, str(new_process_done_status), ai_conversation_memory
+
+        # Prepare messages list for OpenAI API call for the current turn.
+        # This list will be built fresh for each API call to ensure clean context.
+        messages_for_openai = []
+        messages_for_openai.append({"role": "system", "content": ikigai_consultant_rules})
+
+        # Add the clean, internal conversation memory to the OpenAI messages.
+        messages_for_openai.extend(ai_conversation_memory)
+        # Add the current user input to the OpenAI messages.
+        messages_for_openai.append({"role": "user", "content": user_input_message})
+
+
+        # Check if we are still in the phase of asking the four core Ikigai questions.
+        if current_question_number < len(the_ikigai_questions_list):
+            # Store the user's answer for the current question.
+            # The user_input_message is the answer to the question that was asked *before* this turn.
+            question_key = f"answer{current_question_number + 1}"
+            user_answers[question_key] = user_input_message
+
+            # We create a specific prompt for the AI to acknowledge the user's answer
+            # and then ask the next question, or instruct to ask for final synthesis.
+            # This instruction is added as a *temporary* user message for the AI's current turn.
+            # It is NOT added to ai_conversation_memory.
+            acknowledgment_and_next_q_prompt = f"""
+            The user just responded to the question about "{the_ikigai_questions_list[current_question_number]}": "{user_input_message}".
+            Please provide a brief, concise, and pithy acknowledgment (e.g., "Thank you for sharing," or "I appreciate that.").
+            Then, if there are more core Ikigai questions to ask (you have asked {current_question_number + 1} questions so far), ask the next one from your list.
+            If all four core questions have now been answered (i.e., this was the answer to the fourth question),
+            instead of asking another question, instruct the user to say:
+            "Now, please provide the structured reflection based on all my answers."
+            """
+            messages_for_openai.append({"role": "user", "content": acknowledgment_and_next_q_prompt})
+
+            # Make the OpenAI API call for acknowledgment/next question
+            completion = openai_chat_client.chat.completions.create(
+                model=the_ai_model_name,
+                messages=messages_for_openai
+            )
+            ai_response_text = completion.choices[0].message.content
+
+            # Increment question index for the next turn
+            current_question_number += 1
+
+        # Check if all four questions have been answered AND the user typed the special phrase
+        # to ask for the final structured reflection.
+        elif current_question_number == len(the_ikigai_questions_list) and \
+             "now, please provide the structured reflection based on all my answers" in user_input_message.lower():
+            # This is the phase to trigger the final structured reflection
+
+            # Construct the comprehensive prompt for the AI to synthesize the reflection
+            synthesis_prompt = f"""
+            Based on the following answers to the Ikigai questions provided by the user:
+            1. What I love: {user_answers.get('answer1', 'Not provided')}
+            2. What I'm good at: {user_answers.get('answer2', 'Not provided')}
+            3. What the world needs: {user_answers.get('answer3', 'Not provided')}
+            4. What I can be paid for: {user_answers.get('answer4', 'Not provided')}
+
+            Please provide the "Structured Reflection" as described in your system prompt.
+            Ensure it is concise, brief, and pithy.
+            It must include:
+            • Themes: Highlight key values, interests, strengths, and motivators. This section must be 1-2 sentences.
+            • Intersections: Briefly describe the user's inferred Passion, Mission, Profession, and Vocation. Each intersection description must be 1-2 sentences.
+            • Career Suggestions (3-5): Offer 3-5 concrete career paths. This section must be 1-2 sentences total.
+            You must use short paragraphs or bullet points.
+            """
+            # Add this detailed instruction as a *temporary* user message for the AI's current turn.
+            # It is NOT added to ai_conversation_memory.
+            messages_for_openai.append({"role": "user", "content": synthesis_prompt})
+
+            # Make the OpenAI API call for the final synthesis
+            completion = openai_chat_client.chat.completions.create(
+                model=the_ai_model_name,
+                messages=messages_for_openai
+            )
+            ai_response_text = completion.choices[0].message.content
+            new_process_done_status = True # Mark the process as complete
+
+        else:
+            # This case handles unexpected user input after all questions are asked but before synthesis,
+            # or if the user types something irrelevant during the question phase.
+            ai_response_text = "I'm sorry, I'm still in the Ikigai discovery process. Please answer the current question or type 'Now, please provide the structured reflection based on all my answers.' if you've answered all four questions."
+
+    except Exception as problem:
+        # Generic error handling for API calls or other issues
+        print(f"Oh no, something went wrong when talking to OpenAI: {problem}")
+        ai_response_text = f"I'm sorry, but I encountered an error: {problem}. Please try again or refresh the page."
+
+    # Finally, we append the AI's response to the chat_history_list for Gradio display.
+    # Gradio's ChatInterface already added the user's message, so we just add the AI's.
+    chat_history_list.append({"role": "assistant", "content": ai_response_text})
+
+    # Crucially, update the AI's internal conversation memory with the user's input and AI's response
+    # to maintain a clean history for future OpenAI calls.
+    ai_conversation_memory.append({"role": "user", "content": user_input_message})
+    ai_conversation_memory.append({"role": "assistant", "content": ai_response_text})
+
+
+    # We return all the updated information back to Gradio.
+    # Note: user_answers and ai_conversation_memory are returned directly as Python objects
+    return chat_history_list, str(current_question_number), user_answers, str(new_process_done_status), ai_conversation_memory
+
+# --- Gradio Web Interface Setup (How it Looks and Works) ---
+
+# These are special Gradio components that store information (state)
+# that needs to be remembered between each time you send a message.
+# They are 'hidden' from the user but are important for the program's logic.
+current_question_index_storage = gr.State(0) # Stores which question number we are on (starts at 0)
+user_answers_storage = gr.State({}) # Stores all the answers the user gives (as a Python dictionary)
+process_finished_status = gr.State("False") # A flag to tell us if the whole Ikigai process is done
+# This state will store the AI's clean internal conversation memory (as a Python list of dicts)
+ai_conversation_memory_storage = gr.State([])
+
+# The main chatbot component
+# Explicitly set type='messages' to align with OpenAI's format and remove warning
+my_chatbot_display = gr.Chatbot(
+    label="Ikigai Discovery Conversation", # Label shown above the chat area
+    height=400, # Makes the chat area 400 pixels tall
+    # This sets a simple robot icon for the AI's messages.
+    avatar_images=(None, "https://www.svgrepo.com/show/509278/robot-face.svg"),
+    render_markdown=True, # This allows the AI to use bold text, lists, etc.
+    type='messages' # Specify the type of messages for the chatbot
+)
+
+# The chat interface component, linking the UI to our Python function
+# Explicitly set type='messages' to align with OpenAI's format and remove warning
+# Removed all button arguments to rely on Gradio's defaults for simplicity and compatibility
+chat_interaction_area = gr.ChatInterface(
+    fn=handle_ikigai_chat, # The Python function that handles chat logic
+    chatbot=my_chatbot_display, # Links to the chat display area
+    textbox=gr.Textbox(placeholder="Type your answer here...", container=False, scale=7),
+    # These are the hidden state variables that our chat function needs as input.
+    # user_answers_storage and ai_conversation_memory_storage now pass Python objects directly
+    additional_inputs=[
+        current_question_index_storage,
+        user_answers_storage,
+        process_finished_status,
+        ai_conversation_memory_storage # Pass the AI's internal memory
+    ],
+    # These are the hidden state variables that our chat function updates and returns.
+    # user_answers_storage and ai_conversation_memory_storage now receive Python objects directly
+    additional_outputs=[
+        current_question_index_storage,
+        user_answers_storage,
+        process_finished_status,
+        ai_conversation_memory_storage # Receive the updated AI's internal memory
+    ],
+    type='messages' # Specify the type of messages for the chat interface
+)
+
+# This is the command that actually starts the Gradio web application.
+# It will give you a link in your terminal that you can open in your web browser.
+if __name__ == "__main__":
+    chat_interaction_area.launch() # Launch the ChatInterface directly

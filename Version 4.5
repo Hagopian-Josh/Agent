@@ -1,0 +1,184 @@
+import os
+import openai
+from dotenv import load_dotenv
+import gradio as gr
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Retrieve API key from environment variable
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Initialize OpenAI client if API key is present
+if OPENAI_API_KEY:
+    openai.api_key = OPENAI_API_KEY
+else:
+    print("Warning: OPENAI_API_KEY not found in .env file. AI-assisted reflection will not be available.")
+
+# --- Global state variables for the conversation ---
+conversation_stage = 0
+user_responses = {
+    "love": "",
+    "good_at": "",
+    "world_needs": "",
+    "paid_for": ""
+}
+questions = [
+    "To begin, what activities, interests, or experiences bring you deep joy and energy?",
+    "Next, what are your strengths, talents, or abilities?",
+    "Now, what causes or unmet needs in the world do you feel strongly about?",
+    "Finally, what marketable skills, experience, or knowledge do you have for which others would pay?"
+]
+acknowledgements = [
+    "Thank you for sharing that.",
+    "I appreciate that.",
+    "Thank you for sharing.",
+    "I appreciate that."
+]
+follow_up_questions = [
+    "Could you tell me a little more about that?",
+    "Could you elaborate a bit on those?",
+    "Can you give me a bit more detail on that?",
+    "Could you explain that further?"
+]
+
+# --- Gradio Chatbot Function ---
+def ikigai_chatbot(message, history):
+    global conversation_stage
+    global user_responses
+
+    response_parts = [] # To accumulate parts of the response
+
+    # Initial greeting - only occurs on first interaction
+    if conversation_stage == 0:
+        conversation_stage += 1
+        return "Hello! I'm here to help you explore your Ikigai, a Japanese concept meaning 'a reason for being.'\nWe'll uncover what brings you joy, what you excel at, what the world needs, and what you can be paid for.\nLet's start our journey!\n\n" + questions[0]
+
+    # Process user's last message
+    # Determine which question was just answered based on stage
+    # The stage progresses like this:
+    # 1: Asking Q1
+    # 2: User answers Q1, we acknowledge. Potentially ask Follow-up Q1.
+    # 3: User answers Follow-up Q1 (if asked), we acknowledge. Ask Q2.
+    # 4: User answers Q2, we acknowledge. Potentially ask Follow-up Q2.
+    # 5: User answers Follow-up Q2 (if asked), we acknowledge. Ask Q3.
+    # ... and so on.
+
+    # Calculate which *main* question the user just responded to.
+    # Each main question has 2 possible stages: asking the question (even index for current_q_idx)
+    # or asking its follow-up (odd index for current_q_idx, when (stage-1)%2 == 1)
+    current_question_index = (conversation_stage - 1) // 2
+
+    # Acknowledge the user's last input
+    if current_question_index < len(acknowledgements): # Ensure index is within bounds
+        response_parts.append(acknowledgements[current_question_index])
+
+    # Store the user's response based on the current stage
+    # This logic determines if the message is for a main question or a follow-up
+    if (conversation_stage - 1) % 2 == 0: # This means the user just answered a MAIN question
+        if current_question_index == 0:
+            user_responses["love"] = message
+        elif current_question_index == 1:
+            user_responses["good_at"] = message
+        elif current_question_index == 2:
+            user_responses["world_needs"] = message
+        elif current_question_index == 3:
+            user_responses["paid_for"] = message
+
+        # Check for vagueness for the main question and ask follow-up if needed
+        if len(message.split()) < 3 and current_question_index < len(follow_up_questions):
+            response_parts.append(follow_up_questions[current_question_index])
+            conversation_stage += 1 # Stay in the "follow-up" stage for this question
+        else:
+            conversation_stage += 1 # Move to the next "main question" stage
+    else: # This means the user just answered a FOLLOW-UP question
+        if current_question_index == 0:
+            user_responses["love"] += " " + message
+        elif current_question_index == 1:
+            user_responses["good_at"] += " " + message
+        elif current_question_index == 2:
+            user_responses["world_needs"] += " " + message
+        elif current_question_index == 3:
+            user_responses["paid_for"] += " " + message
+        conversation_stage += 1 # Always move to the next "main question" stage after a follow-up
+
+
+    # Ask the next question (if not yet done) or trigger reflection
+    next_question_to_ask_index = (conversation_stage - 1) // 2
+
+    if next_question_to_ask_index < len(questions) and (conversation_stage - 1) % 2 == 0:
+        # If we are in a stage that expects a new main question to be asked (not a follow-up)
+        response_parts.append(questions[next_question_to_ask_index])
+    elif next_question_to_ask_index >= len(questions) :
+        # All questions asked, generate reflection
+        response_parts.append("\n---\n## Structured Reflection")
+
+        if OPENAI_API_KEY:
+            try:
+                reflection_prompt = f"""
+                Analyze the following user responses for Ikigai discovery and provide a concise structured reflection.
+                Focus on:
+                • Themes (1-2 sentences): Highlight key values, interests, strengths, and motivators.
+                • Intersections: Briefly describe the user's inferred Passion, Mission, Profession, and Vocation. Each intersection description must be 1-2 sentences.
+                • Career Suggestions (3-5 concrete career paths, 1-2 sentences total):
+
+                Your output must be concise, brief, and pithy. You must use short paragraphs or bullet points.
+
+                User Responses:
+                What they love: {user_responses["love"]}
+                What they're good at: {user_responses["good_at"]}
+                What the world needs: {user_responses["world_needs"]}
+                What they can be paid for: {user_responses["paid_for"]}
+                """
+
+                client = openai.OpenAI(api_key=OPENAI_API_KEY) # Initialize client within the function scope
+                completion = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a helpful Ikigai consultant providing concise, pithy insights."},
+                        {"role": "user", "content": reflection_prompt}
+                    ],
+                    max_tokens=400 # Increased slightly for more detailed reflection
+                )
+                ai_reflection = completion.choices[0].message.content
+                response_parts.append(ai_reflection)
+
+            except Exception as e:
+                response_parts.append(f"\nAn error occurred while generating the reflection: {e}")
+                response_parts.append("\nCould not generate an AI-assisted reflection. Here's a basic summary instead:")
+                response_parts.append(generate_basic_reflection()) # Fallback to a helper function
+        else:
+            response_parts.append("\nOPENAI_API_KEY not found. Cannot generate AI-assisted reflection. Here's a basic summary instead:")
+            response_parts.append(generate_basic_reflection()) # Fallback to a helper function
+
+    return "\n\n".join(response_parts)
+
+# Helper function for basic reflection (reused from previous version)
+# (This function remains unchanged)
+def generate_basic_reflection():
+    reflection_text = []
+    reflection_text.append("### Themes:")
+    reflection_text.append(f"Based on your responses, key themes revolve around your passion for {user_responses['love']}, your skills in {user_responses['good_at']}, your desire to address {user_responses['world_needs']}, and your marketable abilities in {user_responses['paid_for']}.")
+    reflection_text.append("\n### Intersections:")
+    reflection_text.append(f"• **Passion (What you love + What you're good at):** This involves activities where your interests and talents align, like {user_responses['love']} where you can apply your {user_responses['good_at']} skills.")
+    reflection_text.append(f"• **Mission (What you love + What the world needs):** This highlights areas where your interests can contribute to addressing global needs, such as using your love for {user_responses['love']} to impact {user_responses['world_needs']}.")
+    reflection_text.append(f"• **Profession (What you're good at + What you can be paid for):** This points to where your skills are valued in the marketplace, for example, leveraging your {user_responses['good_at']} abilities to do {user_responses['paid_for']}.")
+    reflection_text.append(f"• **Vocation (What the world needs + What you can be paid for):** This suggests areas where your paid skills can directly benefit unmet needs, perhaps utilizing {user_responses['paid_for']} to address {user_responses['world_needs']}.")
+    reflection_text.append("\n### Career Suggestions (Potential Ikigai at the center):")
+    reflection_text.append("Based on these insights, potential career paths could include roles that involve problem-solving, creative expression, or community service, possibly in fields related to technology, education, or non-profit work.")
+    return "\n".join(reflection_text)
+
+
+# Create Gradio ChatInterface
+gr.ChatInterface(
+    ikigai_chatbot,
+    chatbot=gr.Chatbot(height=500),
+    textbox=gr.Textbox(placeholder="Type your response here...", container=False, scale=7),
+    title="Ikigai Discovery Consultant",
+    description="**Introduce yourself so we can begin.** Hit the Retry button if the next question doesn't appear.",
+    theme="soft", # A pleasant theme
+    # Ensure these are removed if your Gradio version is older than 4.0
+    # retry_btn=None,
+    # undo_btn="Delete Last Message",
+    # clear_btn="Start Over"
+).queue().launch(share=True)
